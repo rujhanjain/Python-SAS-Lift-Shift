@@ -1,10 +1,15 @@
 # ======================================================
 # code_B_model_score.py
 # Purpose: Model training, evaluation, and OOT scoring
+# Enhanced with automated reporting (Excel + plots + metadata)
 # ======================================================
 
+import joblib
+import os
 import pandas as pd
 import numpy as np
+from datetime import datetime
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     roc_auc_score, accuracy_score, precision_score,
@@ -18,19 +23,86 @@ from lightgbm import LGBMClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-import matplotlib.pyplot as plt
 
 # ------------------------------------------------------
-# 1. Load data and split
+# Utility: create report folder
+# ------------------------------------------------------
+def create_run_folder(base_dir="../ModelReports"):
+    timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    run_dir = os.path.join(base_dir, f"run_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
+# ------------------------------------------------------
+# Utility: confusion matrix + save as image
+# ------------------------------------------------------
+def save_confusion_matrix(y_true, y_pred, title, save_path):
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm,
+                                  display_labels=["Non-Response", "Response"])
+    disp.plot(cmap='Blues', values_format='d')
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    return cm
+
+# ------------------------------------------------------
+# Utility: decile analysis table
+# ------------------------------------------------------
+def decile_analysis(y_true, y_pred_proba, dataset_name="Validation"):
+    df = pd.DataFrame({'Actual': y_true, 'Score': y_pred_proba})
+    df['Decile'] = pd.qcut(df['Score'], 10, labels=False, duplicates='drop') + 1
+    df['Decile'] = 11 - df['Decile']  # rank from top
+    grouped = df.groupby('Decile').agg(
+        Count=('Actual', 'count'),
+        Responders=('Actual', 'sum'),
+        Avg_Score=('Score', 'mean')
+    ).reset_index()
+    grouped['Response_Rate'] = grouped['Responders'] / grouped['Count']
+    grouped['Cumulative_Responders'] = grouped['Responders'].cumsum()
+    grouped['Cumulative_Rate'] = grouped['Cumulative_Responders'] / grouped['Responders'].sum()
+    grouped['Lift'] = grouped['Response_Rate'] / grouped['Response_Rate'].mean()
+    grouped['Dataset'] = dataset_name
+    return grouped
+
+# ------------------------------------------------------
+# Utility: Excel report generator
+# ------------------------------------------------------
+def save_model_report(run_dir, results_val, results_oot, df_decile_val, df_decile_oot, metadata):
+    excel_path = os.path.join(run_dir, "metrics_summary.xlsx")
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        results_val.to_excel(writer, sheet_name="Validation_Summary", index=False)
+        if results_oot is not None:
+            results_oot.to_excel(writer, sheet_name="OOT_Summary", index=False)
+        df_decile_val.to_excel(writer, sheet_name="Decile_Validation", index=False)
+        if df_decile_oot is not None:
+            df_decile_oot.to_excel(writer, sheet_name="Decile_OOT", index=False)
+        meta_df = pd.DataFrame.from_dict(metadata, orient='index', columns=['Value'])
+        meta_df.to_excel(writer, sheet_name="Run_Metadata")
+    print(f"Excel report saved at: {excel_path}")
+
+    meta_path = os.path.join(run_dir, "metadata.json")
+    import json
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=4)
+    print(f"Metadata saved at: {meta_path}")
+
+# ------------------------------------------------------
+# 1. Load data
 # ------------------------------------------------------
 df = pd.read_csv("../Data/HDFC_TRAIN_PROCESSED.csv")
-target = 'Response'
-X = df.drop(columns=[target])
-y = df[target]
+oot_df = pd.read_csv("../Data/HDFC_OOT_PROCESSED.csv")
+
+target = ['Response', 'salary_band_flag', 'vintage_bucket']  # Example target and special columns
+X = df.drop(columns=target, axis=1, errors='ignore')
+y = df[target[0]]
 
 X_train, X_val, y_train, y_val = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
+
+print(f'Training data ki quality: {X_train.isna().sum()[X_train.isna().sum() > 0]}')
 
 # ------------------------------------------------------
 # 2. Define models
@@ -44,7 +116,7 @@ models = {
 }
 
 # ------------------------------------------------------
-# 3. Preprocessing (only for Logistic)
+# 3. Preprocessing
 # ------------------------------------------------------
 num_cols = X.select_dtypes(include=['float64', 'int64']).columns.tolist()
 cat_cols = X.select_dtypes(exclude=['float64', 'int64']).columns.tolist()
@@ -55,7 +127,7 @@ logistic_preprocessor = ColumnTransformer([
 ])
 
 # ------------------------------------------------------
-# 4. Utility functions
+# 4. Evaluation function
 # ------------------------------------------------------
 def evaluate_model(dataset_name, model_name, y_true, y_pred_proba, threshold=0.5):
     y_pred = (y_pred_proba >= threshold).astype(int)
@@ -85,88 +157,73 @@ def evaluate_model(dataset_name, model_name, y_true, y_pred_proba, threshold=0.5
 
     return results, y_pred
 
-def show_confusion_matrix(y_true, y_pred, title):
-    cm = confusion_matrix(y_true, y_pred)
-    print(f"\nConfusion Matrix — {title}")
-    print(pd.DataFrame(cm,
-                       index=["Actual 0", "Actual 1"],
-                       columns=["Pred 0", "Pred 1"]))
-    disp = ConfusionMatrixDisplay(confusion_matrix=cm,
-                                  display_labels=["Non-Response", "Response"])
-    disp.plot(cmap='Blues', values_format='d')
-    plt.title(f"Confusion Matrix — {title}")
-    plt.tight_layout()
-    plt.show()
-
-def plot_auc_bar(results_df):
-    plt.figure(figsize=(8,4))
-    plt.bar(results_df['Model'], results_df['AUC'], color='steelblue')
-    plt.title("Model AUC Comparison (Validation Data)")
-    plt.ylabel("AUC Score")
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.tight_layout()
-    plt.show()
-
 # ------------------------------------------------------
-# 5. Train and evaluate all models on validation set
+# 5. Train and evaluate
 # ------------------------------------------------------
 results = []
 trained_models = {}
 
 for name, model in models.items():
-    if name == 'Logistic':
-        pipe = Pipeline([('prep', logistic_preprocessor), ('clf', model)])
-        pipe.fit(X_train, y_train)
-        pred = pipe.predict_proba(X_val)[:, 1]
-        trained_models[name] = pipe
-    else:
-        model.fit(X_train, y_train)
-        pred = model.predict_proba(X_val)[:, 1]
-        trained_models[name] = model
-    
+    preprocessor = logistic_preprocessor if name == 'Logistic' else ColumnTransformer([
+        ('num', 'passthrough', num_cols),
+        ('cat', 'passthrough', cat_cols)
+    ])
+    pipe = Pipeline([('prep', preprocessor), ('clf', model)])
+    pipe.fit(X_train, y_train)
+    pred = pipe.predict_proba(X_val)[:, 1]
+    trained_models[name] = pipe
+
     res, y_pred_class = evaluate_model("Validation", name, y_val, pred)
     results.append(res)
 
 results_df = pd.DataFrame(results).sort_values('AUC', ascending=False).reset_index(drop=True)
-print("\n=== Validation Metrics (From Train CSV split) ===")
+print("\n=== Validation Metrics ===")
 print(results_df.to_string(index=False))
 
-plot_auc_bar(results_df)
-
 # ------------------------------------------------------
-# 6. Select Champion Model
+# 6. Select and save champion
 # ------------------------------------------------------
 best_model_name = results_df.iloc[0]['Model']
 best_model = trained_models[best_model_name]
-print(f"\nChampion Model Selected: {best_model_name}")
+os.makedirs("../Models", exist_ok=True)
+joblib.dump(best_model, "../Models/champion_model.pkl")
+print(f"\nChampion model saved: {best_model_name}")
 
 # ------------------------------------------------------
-# 7. Evaluate Champion on OOT
+# 7. Evaluate on OOT
 # ------------------------------------------------------
-try:
-    oot_df = pd.read_csv("../Data/DUMMY_PL_DATA_FOR_SAS_VIA_POC_1L_SAMPLE_OOT.csv")
-    print("\nLoaded OOT data:", oot_df.shape)
+X_oot = oot_df.drop(columns=target, axis=1, errors='ignore')
+y_oot = oot_df['Response']
+preds_oot = best_model.predict_proba(X_oot)[:, 1]
+oot_results, y_pred_oot = evaluate_model("OOT", best_model_name, y_oot, preds_oot)
+results_oot_df = pd.DataFrame([oot_results])
 
-    if 'Response' not in oot_df.columns:
-        print("OOT data missing 'Response'; only scoring probabilities.")
-        preds = best_model.predict_proba(
-            oot_df.reindex(columns=X_train.columns, fill_value=0)
-        )[:, 1]
-        pd.DataFrame({'Predicted_Prob': preds}).to_csv("../Data/HDFC_OOT_SCORED.csv", index=False)
-        print("OOT predictions saved to ../Data/HDFC_OOT_SCORED.csv")
-    else:
-        X_oot = oot_df.drop(columns=['Response'], errors='ignore')
-        X_oot = X_oot.reindex(columns=X_train.columns, fill_value=0)
-        y_oot = oot_df['Response']
+# ------------------------------------------------------
+# 8. Generate Reports
+# ------------------------------------------------------
+run_dir = create_run_folder()
 
-        preds = best_model.predict_proba(X_oot)[:, 1]
-        res_oot, y_pred_class = evaluate_model("OOT", best_model_name, y_oot, preds)
-        results_oot_df = pd.DataFrame([res_oot])
+# Save plots
+cm_val_path = os.path.join(run_dir, "confusion_matrix_val.png")
+cm_oot_path = os.path.join(run_dir, "confusion_matrix_oot.png")
+save_confusion_matrix(y_val, (pred >= 0.5).astype(int), "Validation Data", cm_val_path)
+save_confusion_matrix(y_oot, y_pred_oot, "OOT Data", cm_oot_path)
 
-        print("\n=== OOT Metrics (From OOT CSV) ===")
-        print(results_oot_df.to_string(index=False))
+# Decile analysis
+decile_val = decile_analysis(y_val, pred, "Validation")
+decile_oot = decile_analysis(y_oot, preds_oot, "OOT")
 
-        show_confusion_matrix(y_oot, y_pred_class, title="OOT Data")
+# Metadata
+metadata = {
+    "Champion_Model": best_model_name,
+    "Run_Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    "Train_Shape": list(X_train.shape),
+    "Validation_Shape": list(X_val.shape),
+    "OOT_Shape": list(X_oot.shape),
+    "Feature_Count": len(X_train.columns)
+}
 
-except Exception as e:
-    print(f"\nError during OOT evaluation: {e}")
+# Save Excel + JSON report
+save_model_report(run_dir, results_df, results_oot_df, decile_val, decile_oot, metadata)
+
+print(f"\nAll model artifacts and reports saved under: {run_dir}")
