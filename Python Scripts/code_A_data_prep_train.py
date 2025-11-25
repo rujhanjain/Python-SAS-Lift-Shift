@@ -9,6 +9,7 @@ import sqlite3
 from sklearn.model_selection import train_test_split
 import os
 import json
+import swat
 
 os.makedirs('../Data', exist_ok=True)
 os.makedirs('../Models', exist_ok=True)
@@ -310,9 +311,40 @@ def main():
 
     df_oot = feature_engineering_oot(conn)
     df_oot.to_csv("../Data/HDFC_OOT_PROCESSED.csv", index=False)
-
+    
     conn.close()
+
     print("\nData preparation complete.")
+    # ------------------------------------------------------
+    # 8. Load processed data into CAS S3 caslib (PYS3)
+    # ------------------------------------------------------
+    try:
+        print("\nPushing processed data into CAS (caslib: PYS3) ...")
+        
+        # Create CAS session (adjust credentials if needed)
+        cas = swat.CAS("sas-cas-server-default-client", 5570, "Demo1", "Password1")
+
+        # Upload TRAIN
+        cas.upload(
+            "../Data/HDFC_TRAIN_PROCESSED.csv",
+            casout={"caslib": "PYS3", "name": "HDFC_TRAIN_PROCESSED", "promote": True},
+            importoptions={"filetype": "csv", "getnames": True}
+        )
+        print("Uploaded and promoted: HDFC_TRAIN_PROCESSED")
+
+        # Upload OOT
+        cas.upload(
+            "../Data/HDFC_OOT_PROCESSED.csv",
+            casout={"caslib": "PYS3", "name": "HDFC_OOT_PROCESSED", "promote": True},
+            importoptions={"filetype": "csv", "getnames": True}
+        )
+        print("Uploaded and promoted: HDFC_OOT_PROCESSED")
+
+        cas.close()
+        print("CAS upload completed.")
+
+    except Exception as e:
+        print(f"Error during CAS upload: {e}")
 
 if __name__ == "__main__":
     main()
