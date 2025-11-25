@@ -140,35 +140,7 @@ def run_sql_diagnostics(conn):
             print(f"Error in {name}: {e}")
 
 # ------------------------------------------------------
-# 3. Handle VINTAGE Correlation
-# ------------------------------------------------------
-def handle_vintage_correlation(conn):
-    sample_corr = run_query("""
-        SELECT VINTAGE, VINTAGE_DAYS
-        FROM customer_pl_train
-        WHERE VINTAGE IS NOT NULL AND VINTAGE_DAYS IS NOT NULL
-        LIMIT 30000
-    """, conn)
-
-    if sample_corr.empty:
-        print("No correlation check data; dropping DUMMY_ID")
-        for tbl in ['customer_pl_train', 'customer_pl_oot']:
-            try: run_modify(f"ALTER TABLE {tbl} DROP COLUMN DUMMY_ID;", conn)
-            except: pass
-        return
-
-    corr_val = sample_corr['VINTAGE'].corr(sample_corr['VINTAGE_DAYS'])
-    print(f"\nCorrelation (VINTAGE vs VINTAGE_DAYS): {corr_val:.4f}")
-
-    if corr_val > 0.9:
-        print("High correlation detected — dropping VINTAGE and DUMMY_ID")
-        for col in ['VINTAGE', 'DUMMY_ID']:
-            for tbl in ['customer_pl_train', 'customer_pl_oot']:
-                try: run_modify(f"ALTER TABLE {tbl} DROP COLUMN {col};", conn)
-                except: pass
-
-# ------------------------------------------------------
-# 4. Calculated Columns
+# 3. Calculated Columns
 # ------------------------------------------------------
 def apply_calculated_columns(conn, table_name):
     queries_calc = [
@@ -235,16 +207,6 @@ def feature_engineering_train(conn):
     high_miss = [c for c in df.columns if df[c].isna().mean() * 100 > 50]
 
     drop_cols = list(set(zero_var + high_miss))
-
-    # Correlation pruning
-    num_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    to_drop_corr = []
-    if len(num_cols) > 1:
-        corr = df[num_cols].corr().abs()
-        upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-        to_drop_corr = [col for col in upper.columns if any(upper[col] > 0.95)]
-
-    drop_cols = list(set(drop_cols + to_drop_corr))
     df = df.drop(columns=drop_cols, errors='ignore')
 
     # Monetary detection
@@ -274,7 +236,6 @@ def feature_engineering_train(conn):
     static_filters = {
         "zero_var_drop": zero_var,
         "high_miss_drop": high_miss,
-        "corr_drop": to_drop_corr,
         "final_keep": df.columns.tolist()
     }
     with open("../Models/static_filters.json", "w") as f:
@@ -334,7 +295,6 @@ def main():
 
     create_or_replace_tables(conn)
     run_sql_diagnostics(conn)
-    handle_vintage_correlation(conn)
 
     for tbl in ['customer_pl_train', 'customer_pl_oot']:
         apply_calculated_columns(conn, tbl)
