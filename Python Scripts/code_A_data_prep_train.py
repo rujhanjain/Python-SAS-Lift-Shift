@@ -309,8 +309,8 @@ def main():
         json.dump(feature_schema, f, indent=2)
     print(f"Saved feature schema: {len(feature_schema)} features.")
 
-    df_oot = feature_engineering_oot(conn)
-    df_oot.to_csv("../Data/HDFC_OOT_PROCESSED.csv", index=False)
+    # df_oot = feature_engineering_oot(conn)
+    # df_oot.to_csv("../Data/HDFC_OOT_PROCESSED.csv", index=False)
     
     conn.close()
 
@@ -333,12 +333,12 @@ def main():
         print("Uploaded and promoted: HDFC_TRAIN_PROCESSED")
 
         # Upload OOT
-        cas.upload(
-            "../Data/HDFC_OOT_PROCESSED.csv",
-            casout={"caslib": "PYS3", "name": "HDFC_OOT_PROCESSED", "promote": True},
-            importoptions={"filetype": "csv", "getnames": True}
-        )
-        print("Uploaded and promoted: HDFC_OOT_PROCESSED")
+        # cas.upload(
+        #     "../Data/HDFC_OOT_PROCESSED.csv",
+        #     casout={"caslib": "PYS3", "name": "HDFC_OOT_PROCESSED", "promote": True},
+        #     importoptions={"filetype": "csv", "getnames": True}
+        # )
+        # print("Uploaded and promoted: HDFC_OOT_PROCESSED")
 
         cas.close()
         print("CAS upload completed.")
